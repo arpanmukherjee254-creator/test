@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "LeetCode Tracker",
+  "version": "1.0",
+
+  "permissions": [
+    "storage",
+    "identity",
+    "tabs",
+    "activeTab"
+  ],
+
+  "host_permissions": [
+    "https://api.github.com/*",
+    "http://localhost:4000/*"
+  ],
+
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+
+  "action": {
+    "default_popup": "popup.html"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["https://leetcode.com/*"],
+      "js": ["content.js"]
+    }
+  ]
+}
