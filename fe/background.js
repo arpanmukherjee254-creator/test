@@ -1,8 +1,6 @@
 // =========================
 // CONFIG
 // =========================
-const CLIENT_ID = "Ov23liHWWxJjyHS8SZzn";
-const REDIRECT_URI = chrome.identity.getRedirectURL("github");
 const REPO_NAME = "leetcode-tracker";
 
 const DEFAULT_STATS = {
@@ -16,313 +14,265 @@ const DEFAULT_STATS = {
 // UTILS
 // =========================
 function normalizeDifficulty(d) {
-  if (!d) return "Easy";
-  return d.charAt(0).toUpperCase() + d.slice(1).toLowerCase();
+  return d ? d[0].toUpperCase() + d.slice(1).toLowerCase() : "Easy";
 }
 
 function base64EncodeUnicode(str) {
-  return btoa(
-    encodeURIComponent(str).replace(
-      /%([0-9A-F]{2})/g,
-      (_, p1) => String.fromCharCode("0x" + p1)
-    )
-  );
+  return btoa(unescape(encodeURIComponent(str)));
 }
 
 function stripBase64Prefix(dataUrl) {
+  if (!dataUrl) return null;
   return dataUrl.replace(/^data:image\/png;base64,/, "");
 }
 
 // =========================
-// STATE
+// SCREENSHOT CAPTURE (NEW APPROACH)
 // =========================
-let pendingProblem = null;
-
-// =========================
-// AUTH FLOW
-// =========================
-function startGithubOAuth() {
-  const authUrl =
-    "https://github.com/login/oauth/authorize" +
-    "?client_id=" + CLIENT_ID +
-    "&redirect_uri=" + encodeURIComponent(REDIRECT_URI) +
-    "&scope=repo read:user";
-
-  chrome.identity.launchWebAuthFlow(
-    { url: authUrl, interactive: true },
-    async (redirectUrl) => {
-      if (chrome.runtime.lastError || !redirectUrl) return;
-
-      const code = new URL(redirectUrl).searchParams.get("code");
-      if (!code) return;
-
-      const tokenRes = await fetch("http://localhost:4000/exchange-code", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code })
-      });
-
-      const data = await tokenRes.json();
-      if (!data.access_token) return;
-
-      const token = data.access_token;
-      chrome.storage.local.set({ githubToken: token });
-
-      const userRes = await fetch("https://api.github.com/user", {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-
-      const user = await userRes.json();
-
-      chrome.storage.local.set({
-        githubUser: {
-          login: user.login,
-          avatar: user.avatar_url
-        }
-      });
-
-      console.log("✅ GitHub login successful:", user.login);
+async function captureScreenshot(tabId, windowId) {
+  console.log("🎯 Starting screenshot capture...");
+  console.log("Tab ID:", tabId, "Window ID:", windowId);
+  
+  try {
+    // Step 1: Get current window state
+    const currentWindow = await chrome.windows.getCurrent();
+    console.log("Current window ID:", currentWindow.id);
+    
+    // Step 2: Ensure tab is active in its window
+    await chrome.tabs.update(tabId, { active: true });
+    console.log("✓ Tab activated");
+    
+    // Step 3: Get tab details to verify
+    const tab = await chrome.tabs.get(tabId);
+    console.log("Tab state:", { active: tab.active, status: tab.status, url: tab.url });
+    
+    if (!tab.active) {
+      console.warn("⚠️ Tab is not active after update");
     }
-  );
+    
+    // Step 4: Focus the window
+    await chrome.windows.update(windowId, { focused: true });
+    console.log("✓ Window focused");
+    
+    // Step 5: Wait for everything to settle
+    await new Promise(resolve => setTimeout(resolve, 800));
+    console.log("✓ Waited 800ms");
+    
+    // Step 6: Capture
+    console.log("📸 Attempting capture...");
+    const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: "png" });
+    
+    if (!dataUrl) {
+      console.error("❌ Capture returned null/undefined");
+      return null;
+    }
+    
+    console.log("✅ Screenshot captured! Size:", dataUrl.length, "bytes");
+    return dataUrl;
+    
+  } catch (error) {
+    console.error("❌ Screenshot capture failed:", error);
+    console.error("Error details:", {
+      message: error.message,
+      stack: error.stack
+    });
+    return null;
+  }
 }
 
 // =========================
 // MESSAGE HANDLER
 // =========================
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  console.log("📩 BG RECEIVED:", msg);
+  if (msg.type !== "PUSH_FROM_PAGE") return;
 
-  if (msg.type === "LOGIN_GITHUB") {
-    startGithubOAuth();
-    return;
-  }
+  console.log("📨 Received PUSH_FROM_PAGE message");
+  console.log("Sender tab:", sender.tab.id, "window:", sender.tab.windowId);
 
-  if (msg.type === "LEETCODE_ACCEPTED") {
-    pendingProblem = msg.payload;
-    chrome.action.openPopup();
-    return;
-  }
+  const payload = msg.payload;
+  const tabId = sender.tab.id;
+  const windowId = sender.tab.windowId;
 
-  if (msg.type === "GET_PENDING_PROBLEM") {
-    sendResponse(pendingProblem);
-    return true;
-  }
+  // Handle async
+  (async () => {
+    try {
+      // Capture screenshot
+      const screenshot = await captureScreenshot(tabId, windowId);
+      payload.screenshot = screenshot;
+      
+      if (!screenshot) {
+        console.warn("⚠️ No screenshot captured, continuing without it");
+      }
+      
+      // Push to GitHub
+      await handlePush(payload);
+      
+      sendResponse({ success: true });
+    } catch (error) {
+      console.error("❌ Error in message handler:", error);
+      sendResponse({ success: false, error: error.message });
+    }
+  })();
 
-  if (msg.type === "USER_CONFIRMED_PUSH") {
-    handleConfirmedPush();
-    return;
-  }
-
-  if (msg.type === "USER_DENIED_PUSH") {
-    pendingProblem = null;
-  }
+  // Return true to indicate async response
+  return true;
 });
 
 // =========================
-// CORE FLOW (FINAL)
+// CORE PUSH
 // =========================
-async function handleConfirmedPush() {
+async function handlePush(problem) {
   try {
-    if (!pendingProblem) return;
-
+    console.log("🚀 Starting GitHub push...");
+    
     const token = await getGithubToken();
-    const username = await fetchAndStoreGithubUser(token);
-    if (!token || !username) return;
+    const username = await getGithubUsername();
+    
+    if (!token || !username) {
+      console.error("❌ Missing GitHub credentials");
+      return;
+    }
 
-    const diff = normalizeDifficulty(pendingProblem.difficulty);
-    const basePath = `problems/${diff}/${pendingProblem.slug}`;
+    console.log("✓ Got credentials for:", username);
+
+    const diff = normalizeDifficulty(problem.difficulty);
+    const basePath = `problems/${diff}/${problem.slug}`;
 
     await ensureRepo(token, username);
+    console.log("✓ Repo ensured");
 
-    // 1️⃣ META
+    // META
     await uploadFile(
       token,
       username,
       `${basePath}/meta.json`,
-      JSON.stringify(
-        {
-          title: pendingProblem.title,
-          difficulty: diff,
-          topics: pendingProblem.topics,
-          url: pendingProblem.url,
-          date: new Date().toISOString().split("T")[0]
-        },
-        null,
-        2
-      )
+      JSON.stringify({
+        title: problem.title,
+        difficulty: diff,
+        topics: problem.topics,
+        url: problem.url,
+        date: new Date().toISOString().split("T")[0]
+      }, null, 2)
     );
+    console.log("✓ Uploaded meta.json");
 
-    // 2️⃣ QUESTION (HTML)
-    if (pendingProblem.questionHtml) {
+    // QUESTION
+    if (problem.questionMd) {
       await uploadFile(
         token,
         username,
-        `${basePath}/question.html`,
-        pendingProblem.questionHtml
+        `${basePath}/question.md`,
+        `# ${problem.title}\n\n${problem.questionMd}`
       );
+      console.log("✓ Uploaded question.md");
     }
 
-    // 3️⃣ SOLUTION
-    if (pendingProblem.code) {
+    // SOLUTION
+    if (problem.code) {
       const extMap = {
         java: "java",
         cpp: "cpp",
-        c: "c",
         python: "py",
         javascript: "js",
         typescript: "ts"
       };
-
-      const ext =
-        extMap[pendingProblem.language?.toLowerCase()] || "txt";
+      const ext = extMap[problem.language?.toLowerCase()] || "txt";
 
       await uploadFile(
         token,
         username,
         `${basePath}/solution.${ext}`,
-        pendingProblem.code
+        problem.code
       );
+      console.log(`✓ Uploaded solution.${ext}`);
     }
 
-    // 4️⃣ SCREENSHOT (already base64)
-    if (pendingProblem.screenshot) {
+    // SCREENSHOT
+    const ss = stripBase64Prefix(problem.screenshot);
+    if (ss) {
+      console.log("📸 Uploading screenshot...");
       await uploadFile(
         token,
         username,
         `${basePath}/screenshot.png`,
-        stripBase64Prefix(pendingProblem.screenshot),
+        ss,
         true
       );
+      console.log("✓ Uploaded screenshot.png");
+    } else {
+      console.warn("⚠️ No screenshot to upload");
     }
 
-    // 5️⃣ STATS + README
-    await updateStats(token, username, diff);
+    // STATS
+    const stats = await updateStats(token, username, diff);
+    console.log("✓ Updated stats:", stats);
 
-    pendingProblem = null;
-    console.log("✅ PUSH FLOW COMPLETE");
+    // README
+    await uploadFile(
+      token,
+      username,
+      "README.md",
+      `# LeetCode Solutions
+
+Automatically tracked via browser extension.
+
+## 📊 Stats
+- Easy: ${stats.Easy}
+- Medium: ${stats.Medium}
+- Hard: ${stats.Hard}
+- Total: ${stats.Total}
+`
+    );
+    console.log("✓ Updated README.md");
+
+    console.log("✅ GitHub push complete!");
+
   } catch (e) {
-    console.error("❌ PUSH FLOW FAILED:", e);
+    console.error("❌ Push failed:", e);
+    console.error("Error stack:", e.stack);
   }
 }
 
 // =========================
-// STORAGE HELPERS
+// GITHUB HELPERS
 // =========================
 function getGithubToken() {
-  return new Promise(resolve => {
-    chrome.storage.local.get("githubToken", res => {
-      resolve(res.githubToken || null);
-    });
-  });
+  return new Promise(r =>
+    chrome.storage.local.get("githubToken", x => r(x.githubToken))
+  );
 }
 
 function getGithubUsername() {
-  return new Promise(resolve => {
-    chrome.storage.local.get("githubUser", res => {
-      resolve(res.githubUser?.login || null);
-    });
-  });
+  return new Promise(r =>
+    chrome.storage.local.get("githubUser", x => r(x.githubUser?.login))
+  );
 }
 
-async function fetchAndStoreGithubUser(token) {
-  const existing = await getGithubUsername();
-  if (existing) return existing;
-
-  const res = await fetch("https://api.github.com/user", {
-    headers: { Authorization: `Bearer ${token}` }
-  });
-
-  const user = await res.json();
-
-  chrome.storage.local.set({
-    githubUser: {
-      login: user.login,
-      avatar: user.avatar_url
-    }
-  });
-
-  return user.login;
-}
-
-// =========================
-// REPO SETUP
-// =========================
 async function ensureRepo(token, username) {
-  const repoUrl = `https://api.github.com/repos/${username}/${REPO_NAME}`;
-  const check = await fetch(repoUrl, {
-    headers: { Authorization: `Bearer ${token}` }
-  });
+  const res = await fetch(
+    `https://api.github.com/repos/${username}/${REPO_NAME}`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
 
-  if (check.status !== 404) return;
+  if (res.status !== 404) return;
 
-  const create = await fetch("https://api.github.com/user/repos", {
+  await fetch("https://api.github.com/user/repos", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({
-      name: REPO_NAME,
-      description: "📊 Automated LeetCode Tracker",
-      private: false
-    })
+    body: JSON.stringify({ name: REPO_NAME, private: false })
   });
-
-  if (!create.ok) throw new Error("Repo creation failed");
-
-  await uploadFile(
-    token,
-    username,
-    "README.md",
-    generateReadme({ ...DEFAULT_STATS })
-  );
-
-  await uploadFile(
-    token,
-    username,
-    "stats/summary.json",
-    JSON.stringify({ ...DEFAULT_STATS }, null, 2)
-  );
 }
 
-// =========================
-// STATS + README
-// =========================
-async function getFileJSON(token, username, path) {
-  const res = await fetch(
-    `https://api.github.com/repos/${username}/${REPO_NAME}/contents/${path}`,
-    { headers: { Authorization: `Bearer ${token}` } }
-  );
-
-  if (!res.ok) return null;
-
-  const json = await res.json();
-  return JSON.parse(atob(json.content));
-}
-
-async function updateStats(token, username, diff) {
-  const statsPath = "stats/summary.json";
-  let stats = await getFileJSON(token, username, statsPath);
-  if (!stats) stats = { ...DEFAULT_STATS };
-
-  stats[diff]++;
-  stats.Total++;
-
-  await uploadFile(token, username, statsPath, JSON.stringify(stats, null, 2));
-  await uploadFile(token, username, "README.md", generateReadme(stats));
-}
-
-// =========================
-// GITHUB FILE UPLOAD
-// =========================
-async function uploadFile(token, username, path, content, isBinary = false) {
+async function uploadFile(token, username, path, content, binary = false) {
   const url = `https://api.github.com/repos/${username}/${REPO_NAME}/contents/${path}`;
 
   let sha;
   const existing = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` }
   });
-
   if (existing.ok) sha = (await existing.json()).sha;
 
   await fetch(url, {
@@ -333,30 +283,36 @@ async function uploadFile(token, username, path, content, isBinary = false) {
     },
     body: JSON.stringify({
       message: `Update ${path}`,
-      content: isBinary ? content : base64EncodeUnicode(content),
+      content: binary ? content : base64EncodeUnicode(content),
       sha
     })
   });
 }
 
-// =========================
-// README GENERATOR
-// =========================
-function generateReadme(stats) {
-  return `
-# 📊 LeetCode Tracker
+async function updateStats(token, username, diff) {
+  const path = "stats/summary.json";
+  let stats = { ...DEFAULT_STATS };
 
-Automatically updated via Chrome Extension.
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/${username}/${REPO_NAME}/contents/${path}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (res.ok) {
+      const json = await res.json();
+      stats = JSON.parse(atob(json.content));
+    }
+  } catch {}
 
-## Stats
+  stats[diff]++;
+  stats.Total++;
 
-| Difficulty | Solved |
-|----------|--------|
-| Easy | ${stats.Easy} |
-| Medium | ${stats.Medium} |
-| Hard | ${stats.Hard} |
-| **Total** | **${stats.Total}** |
+  await uploadFile(
+    token,
+    username,
+    path,
+    JSON.stringify(stats, null, 2)
+  );
 
-_Last updated: ${new Date().toLocaleDateString()}_
-`.trim();
+  return stats;
 }

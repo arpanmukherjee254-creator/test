@@ -1,33 +1,28 @@
 {
   "manifest_version": 3,
-  "name": "LeetCode Tracker",
-  "version": "1.0",
-
+  "name": "LeetCode GitHub Tracker",
+  "version": "1.0.0",
+  "description": "Automatically push LeetCode solutions to GitHub with screenshots",
+  
   "permissions": [
-    "storage",
-    "identity",
     "tabs",
-    "activeTab"
+    "storage",
+    "scripting"
   ],
-
+  
   "host_permissions": [
-    "https://api.github.com/*",
-    "http://localhost:4000/*"
+    "<all_urls>"
   ],
-
+  
   "background": {
-    "service_worker": "background.js",
-    "type": "module"
+    "service_worker": "background.js"
   },
-
-  "action": {
-    "default_popup": "popup.html"
-  },
-
+  
   "content_scripts": [
     {
-      "matches": ["https://leetcode.com/*"],
-      "js": ["content.js"]
+      "matches": ["https://leetcode.com/problems/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
     }
   ]
 }
