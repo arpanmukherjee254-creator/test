@@ -1,19 +1,16 @@
-
 import dotenv from "dotenv";
 dotenv.config();
 
-import  express  from "express";
+import express from "express";
+import cors from "cors";
+import fetch from "node-fetch";
+import bodyParser from "body-parser";
 
-import cors from 'cors'
-import  fetch  from "node-fetch";
-import bodyParser from 'body-parser'
+const app = express();
 
+app.use(cors());
+app.use(bodyParser.json());
 
-
-var app=express()
-
-app.use(cors())
-app.use(bodyParser.json())
 app.post("/exchange-code", async (req, res) => {
   const { code } = req.body;
 
@@ -23,14 +20,14 @@ app.post("/exchange-code", async (req, res) => {
       {
         method: "POST",
         headers: {
-          "Accept": "application/json",
-          "Content-Type": "application/json"
+          Accept: "application/json",
+          "Content-Type": "application/json",
         },
         body: JSON.stringify({
           client_id: process.env.GITHUB_CLIENT_ID,
           client_secret: process.env.GITHUB_CLIENT_SECRET,
-          code
-        })
+          code,
+        }),
       }
     );
 
@@ -40,6 +37,8 @@ app.post("/exchange-code", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-app.listen(4000,function(){
-    console.log("cors server running on port :4000")
-})
+
+const PORT = process.env.PORT || 4000;
+app.listen(PORT, () => {
+  console.log("Server running on port:", PORT);
+});
