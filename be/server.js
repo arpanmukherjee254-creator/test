@@ -10,7 +10,20 @@ const app = express();
 
 app.use(cors());
 app.use(bodyParser.json());
+app.get("/", (req, res) => {
+  res.status(200).json({
+    status: "ok",
+    service: "leetcode-github-backend",
+    timestamp: new Date().toISOString()
+  });
+});
 
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    status: "healthy",
+    uptime: process.uptime()
+  });
+});
 app.post("/exchange-code", async (req, res) => {
   const { code } = req.body;
 
